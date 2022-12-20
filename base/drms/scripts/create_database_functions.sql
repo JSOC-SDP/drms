@@ -13,9 +13,9 @@
 --   updateshadow() - a trigger function that updates a series' table shadow table when a rows is inserted into the series
 
 -- DRMS Keyword data type and function to display keyword information for all namespaces
-DROP TYPE drmskw CASCADE;
+DROP TYPE IF EXISTS drmskw CASCADE;
 
-create type drmskw as (
+CREATE TYPE drmskw AS (
     seriesname  text,
     keywordname text,
     linkname    text,
@@ -52,9 +52,9 @@ $$
 LANGUAGE plpgsql;
 
 -- DRMS Series data type and function to display series information for all namespaces
-DROP TYPE drmsseries CASCADE;
+DROP TYPE IF EXISTS drmsseries CASCADE;
 
-create type drmsseries as (
+CREATE TYPE drmsseries AS (
     seriesname  text,
     author      text,
     owner       text,
@@ -92,9 +92,9 @@ LANGUAGE plpgsql;
 
 
 -- DRMS Segment data type and function to display segment information for all namespaces
-DROP TYPE drmssg CASCADE;
+DROP TYPE IF EXISTS drmssg CASCADE;
 
-create type drmssg as (
+CREATE TYPE drmssg AS (
     seriesname  text,
     segmentname text,
     segnum      int8,
@@ -133,9 +133,9 @@ $$
 LANGUAGE plpgsql;
 
 -- DRMS Session data type and function to display session information for all namespaces
-DROP TYPE drmssession CASCADE;
+DROP TYPE IF EXISTS drmssession CASCADE;
 
-create type drmssession as (
+CREATE TYPE drmssession AS (
      sessionid           bigint,
      hostname            text,
      port                int8,
@@ -175,9 +175,9 @@ $$
 LANGUAGE plpgsql;
 
 -- function to return table of Slony-replicated database tables
-DROP TYPE rep_item CASCADE;
+DROP TYPE IF EXISTS rep_item CASCADE;
 
-create type rep_item as (
+CREATE TYPE rep_item AS (
     tab_id      int8,
     tab_relname varchar(255),
     tab_nspname varchar(255),
