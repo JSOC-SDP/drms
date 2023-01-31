@@ -16,7 +16,7 @@ import socketserver
 import sys
 import threading
 
-from drms_utils import CmdlParser, Arguments as Args, MakeObject, Formatter as DrmsLogFormatter, Log as DrmsLog, LogLevel as DrmsLogLevel, LogLevelAction as DrmsLogLevelAction
+from drms_utils import CmdlParser, Arguments as Args, MakeObject, Formatter as DrmsLogFormatter, Log as DrmsLog, LogLevel as DrmsLogLevel, LogLevelAction as DrmsLogLevelAction, StatusCode as DrmsStatusCode
 from drms_parameters import DRMSParams, DPMissingParameterError
 from drms_export import Error as ExportError, ErrorCode as ExportErrorCode
 
@@ -70,13 +70,46 @@ class LoggingError(DataTransferServerBaseError):
 class ErrorMessageReceived(DataTransferServerBaseError):
     _error_code = ErrorCode(ErrorCode.ERROR_MESSAGE)
 
+class PackageCreationStatus(DrmsStatusCode):
+    CREATED = (0, f'CREATED')
+    CANNOT_WRITE_FILE = (1, f'CANNOT_WRITE_FILE')
+    BAD_CONTENT = (2, f'BAD_CONTENT')
+    ERROR = (3, f'ERROR')
+
+    @property
+    def fullname(self):
+        return self.description()
+
+class PackageVerificationStatus(DrmsStatusCode):
+    VERIFIED = (0, f'VERIFIED')
+    CANNOT_FIND_PACKAGE = (1, f'CANNOT_FIND_PACKAGE')
+    BAD_PACKAGE = (2, f'BAD_PACKAGE')
+    MISSING_MANIFEST = (3, f'MISSING_MANIFEST')
+    UNKNOWN_FILE = (4, f'UNKNOWN_FILE')
+    MISSING_FILE = (5, f'MISSING_FILE')
+    ERROR = (7, f'ERROR')
+
+    @property
+    def fullname(self):
+        return self.description()
+
+class DataFileVerificationStatus(DrmsStatusCode):
+    GOOD = (0, f'G')
+    MISSING = (1, f'M') # file was in manifest, but not in package
+    VERIFICATION_FAILURE = (2, f'V') # file failed verification test
+
+    @property
+    def fullname(self):
+        return self.description()
+
 class MessageType(Enum):
     CLIENT_READY = (1, f'CLIENT_READY')
     PACKAGE_READY = (2, f'PACKAGE_READY')
-    VERIFICATION_READY = (3, f'VERIFICATION_READY')
-    DATA_VERIFIED = (4, f'DATA_VERIFIED')
-    REQUEST_COMPLETE = (5, f'REQUEST_COMPLETE')
-    ERROR = (6, f'ERROR')
+    PACKAGE_VERIFIED = (3, f'PACKAGE_VERIFIED')
+    VERIFICATION_READY = (4, f'VERIFICATION_READY')
+    DATA_VERIFIED = (5, f'DATA_VERIFIED')
+    REQUEST_COMPLETE = (6, f'REQUEST_COMPLETE')
+    ERROR = (7, f'ERROR')
 
     def __new__(cls, value, name):
         member = object.__new__(cls)
@@ -116,17 +149,21 @@ class Message(object):
         return self.__class__.__name__
 
     @classmethod
-    def new_instance(cls, *, json_message, **kwargs):
+    def new_instance(cls, *, json_message, log, **kwargs):
+        log.write_debug([ f'[ Message.new_instance ] ' ])
         msg_type = None
         message = None
         try:
             generic_message = Message(json_message=json_message, **kwargs)
             msg_type = MessageType.get_member(generic_message.message)
+            log.write_debug([ f'[ Message.new_instance ] parsing message of type `{generic_message.message}`'])
 
             if msg_type == MessageType.CLIENT_READY:
                 message = ClientReadyMessage(json_message=json_message, **kwargs)
             elif msg_type == MessageType.PACKAGE_READY:
                 message = PackageReadyMessage(json_message=json_message, **kwargs)
+            elif msg_type == MessageType.PACKAGE_VERIFIED:
+                message = PackageVerifiedMessage(json_message=json_message, **kwargs)
             elif msg_type == MessageType.VERIFICATION_READY:
                 message = VerificationReadyMessage(json_message=json_message, **kwargs)
             elif msg_type == MessageType.DATA_VERIFIED:
@@ -135,6 +172,8 @@ class Message(object):
                 message = RequestCompleteMessage(json_message=json_message, **kwargs)
             elif msg_type == MessageType.ERROR:
                 message = ErrorMessage(json_message=json_message, **kwargs)
+
+            log.write_debug([ f'[ Message.new_instance ] message values: `{str(message.values)}`' ])
         except Exception as exc:
             raise MessageSyntaxError(msg=f'invalid message string `{json_message}`: `{str(exc)}`')
 
@@ -145,6 +184,7 @@ class Message(object):
 
     @classmethod
     def receive(cls, *, client_socket, msg_type, initial_buffer=None, log):
+        log.write_debug([ f'[ Message.receive ]' ])
         buffer = None
         json_message_buffer = []
         open_count = 0
@@ -158,6 +198,7 @@ class Message(object):
                 try:
                     # this is a non-blocking socket; timeout is 1 second
                     binary_buffer = client_socket.recv(1024) # blocking
+                    log.write_debug([ f'[ Message.receive ] received data from client `{client_socket.getpeername()}`: {binary_buffer.decode()}' ])
                     if timeout_event is None:
                         timeout_event = datetime.now() + timedelta(30)
                     if binary_buffer == b'':
@@ -165,8 +206,8 @@ class Message(object):
                 except socket.timeout as exc:
                     # no data written to pipe
                     if datetime.now() > timeout_event:
-                        raise MessageTimeoutError(msg=f'[ Message.receive ] timeout event waiting for client {self.request.getpeername()} to send message')
-                        log.write_debug([ f'[ Message.receive ] waiting for client {self.request.getpeername()} to send message...' ])
+                        raise MessageTimeoutError(msg=f'[ Message.receive ] timeout event waiting for client {client_socket.getpeername()} to send message')
+                        log.write_debug([ f'[ Message.receive ] waiting for client {client_socket.getpeername()} to send message...' ])
                     continue
 
                 buffer = binary_buffer.decode('UTF-8')
@@ -193,11 +234,11 @@ class Message(object):
             if close_count == open_count:
                 break
 
-        log.write_debug([ f'[ Message.receive ] received message from client `{"".join(json_message_buffer)}`' ])
+        log.write_info([ f'[ Message.receive ] received message `{"".join(json_message_buffer)}` from client `{client_socket.getpeername()}`' ])
 
         error_message = None
         try:
-            message = cls.new_instance(json_message=''.join(json_message_buffer))
+            message = cls.new_instance(json_message=''.join(json_message_buffer), log=log)
             log.write_debug([ f'[ Message.receive ] got valid message `{str(message)}`' ])
         except UnexpectedMessageError as exc:
             error_message = str(exc)
@@ -215,6 +256,7 @@ class Message(object):
                 raise MessageSyntaxError(msg=f'[ Message.receive ] invalid message synax; message must contain `message` attribute')
 
         if isinstance(message, ErrorMessage):
+            log.write_error([ f'[ Message.receive ] received error message' ])
             raise ErrorMessageReceived(msg=message.values[0])
 
         if message.message.lower() != msg_type.fullname.lower():
@@ -224,6 +266,7 @@ class Message(object):
 
     @classmethod
     def send(self, *, client_socket, msg_type, **kwargs):
+        log.write_debug([ f'[ Message.send ]' ])
         num_bytes_sent_total = 0
         num_bytes_sent = 0
         timeout_event = datetime.now() + timedelta(30)
@@ -238,6 +281,7 @@ class Message(object):
         while num_bytes_sent_total < len(encoded_message):
             try:
                 num_bytes_sent = client_socket.send(encoded_message[num_bytes_sent_total:])
+                log.write_debug([ f'[ Message.send ] sent data to client `{client_socket.getpeername()}`: {encoded_message[num_bytes_sent_total:num_bytes_sent].decode()}' ])
                 if not num_bytes_sent:
                     raise ControlConnectionError(msg=f'[ Message.send ] socket broken; cannot send message data to client')
                 num_bytes_sent_total += num_bytes_sent
@@ -248,20 +292,27 @@ class Message(object):
                 if self.log:
                     self.log.write_debug([ f'[ Message.send ] {msg}' ])
 
+        log.write_info([ f'[ Message.send ] sent message `{json_message}` to client `{client_socket.getpeername()}`' ])
+
 class ClientReadyMessage(Message):
     def __init__(self, *, json_message=None, **kwargs):
         super().__init__(json_message=json_message, **kwargs)
-        self.values = (self.product, self.number_of_files, self.file_template)
+        self.values = (self.product, self.number_of_files, self.export_file_format)
 
 class PackageReadyMessage(Message):
     def __init__(self, *, json_message=None, **kwargs):
         super().__init__(json_message=json_message, **kwargs)
-        self.values = (self.package_path)
+        self.values = (PackageCreationStatus(self.status), self.package_host, self.package_path)
+
+class PackageVerifiedMessage(Message):
+    def __init__(self, *, json_message=None, **kwargs):
+        super().__init__(json_message=json_message, **kwargs)
+        self.values = (PackageVerificationStatus(self.status), self.number_of_files)
 
 class VerificationReadyMessage(Message):
     def __init__(self, *, json_message=None, **kwargs):
         super().__init__(json_message=json_message, **kwargs)
-        self.values = ()
+        self.values = (self.number_of_files, )
 
 class DataVerifiedMessage(Message):
     def __init__(self, *, json_message=None, **kwargs):
@@ -335,7 +386,7 @@ class DataTransferTCPServer(socketserver.ThreadingTCPServer):
 
     def get_request(self):
         (control_socket, client_address) = super().get_request()
-        self.log.write_info([ f'accepting connection request from client `{str(client_address)}`'])
+        self.log.write_info([ f'[ DataTransferTCPServer.get_request ] accepting connection request from client `{str(client_address)}`'])
         return (control_socket, client_address)
 
 class DataTransferTCPRequestHandler(socketserver.BaseRequestHandler):
@@ -343,11 +394,9 @@ class DataTransferTCPRequestHandler(socketserver.BaseRequestHandler):
         self._drms_id_regex = None
         super().__init__(request, client_address, server)
 
-
-
-
     # self.server is the DataTransferTCPServer
     def handle(self):
+        self.server.log.write_debug([ f'[ DataTransferTCPRequestHandler.handle ] '])
         self.server.log.write_info([ f'[ DataTransferTCPRequestHandler.handle ] handling session from client `{str(self.client_address)}`' ])
         terminate = False
 
@@ -357,38 +406,60 @@ class DataTransferTCPRequestHandler(socketserver.BaseRequestHandler):
         try:
             # receive CLIENT_READY message from client
             self.server.log.write_debug([ f'[ DataTransferTCPRequestHandler.handle ] waiting for client `{str(self.client_address)}` to send  {MessageType.CLIENT_READY.fullname} message' ])
-            product, number_of_files, file_template = Message.receive(client_socket=self.request, msg_type=MessageType.CLIENT_READY, log=self.server.log)
+            product, number_of_files, export_file_format = Message.receive(client_socket=self.request, msg_type=MessageType.CLIENT_READY, log=self.server.log)
 
             package_path_tmp = os.path.join(self.server.package_root, f'.{str(uuid.uuid4())}.tar')
             package_path = os.path.join(self.server.package_root, f'{str(uuid.uuid4())}.tar')
 
-            self.server.log.write_debug([ f'[ DataTransferTCPRequestHandler.handle ] creating data file {package_path} for client `{str(self.client_address)}`' ])
+            self.server.log.write_info([ f'[ DataTransferTCPRequestHandler.handle ] creating data file {package_path} for client `{str(self.client_address)}`' ])
 
             # write data to disk, send client path info
-            with open(package_path_tmp, 'w+b') as self._data_file:
-                self.server.log.write_debug([ f'[ DataTransferTCPRequestHandler.handle ] writing data file for client `{str(self.client_address)}` to file {package_path_tmp}' ])
-                asyncio.run(self.create_package(product=product, number_of_files=number_of_files, file_template=file_template, package_path=package_path_tmp))
+            try:
+                with open(package_path_tmp, 'w+b') as self._data_file:
+                    self.server.log.write_debug([ f'[ DataTransferTCPRequestHandler.handle ] writing data file for client `{str(self.client_address)}` to file {package_path_tmp}' ])
+                    asyncio.run(self.create_package(product=product, number_of_files=number_of_files, export_file_format=export_file_format, package_path=package_path_tmp))
+            except SubprocessError as exc:
+                # problem creating package content
+                raise ExportFileError(msg=f'{str(exc)}', msg_type=MessageType.PACKAGE_READY, kwargs={ 'status' : PackageCreationStatus.BAD_CONTENT })
+            except ExportFileError as exc:
+                # problem creating package content
+                raise ExportFileError(msg=f'{str(exc)}', msg_type=MessageType.PACKAGE_READY, kwargs={ 'status' : PackageCreationStatus.BAD_CONTENT })
+            except OSError as exc:
+                # unable to open package file for write
+                raise ExportFileError(msg=f'{str(exc)}', msg_type=MessageType.PACKAGE_READY, kwargs={ 'status' : PackageCreationStatus.CANNOT_WRITE_FILE })
 
             # if no failure, rename package
-            os.rename(package_path_tmp, package_path)
-            self.server.log.write_debug([ f'[ DataTransferTCPRequestHandler.handle ] renamed {package_path_tmp} to {package_path}' ])
+            try:
+                os.rename(package_path_tmp, package_path)
+                self.server.log.write_debug([ f'[ DataTransferTCPRequestHandler.handle ] renamed {package_path_tmp} to {package_path}' ])
+            except OSError as exc:
+                raise ExportFileError(msg=f'{str(exc)}', status=PackageCreationStatus.CANNOT_WRITE_FILE, msg_type=MessageType.PACKAGE_READY)
 
             # send PACKAGE_READY message to client; the package COULD be empty (no segments available to export)
             self.server.log.write_debug([ f'[ DataTransferTCPRequestHandler.handle ] sending {MessageType.PACKAGE_READY.fullname} message to client `{str(self.client_address)}`' ])
-            Message.send(client_socket=self.request, msg_type=MessageType.PACKAGE_READY, package_host=self.server.package_host, package_path=package_path)
+            Message.send(client_socket=self.request, msg_type=MessageType.PACKAGE_READY, status=int(PackageCreationStatus.CREATED), package_host=self.server.package_host, package_path=package_path)
 
-            # receive VERIFICATION_READY
-            self.server.log.write_debug([ f'[ DataTransferTCPRequestHandler.handle ] waiting for client `{str(self.client_address)}` to send  {MessageType.VERIFICATION_READY.fullname} message' ])
-            Message.receive(client_socket=self.request, msg_type=MessageType.VERIFICATION_READY, log=self.server.log)
+            # receive PACKAGE_VERIFIED
+            self.server.log.write_debug([ f'[ DataTransferTCPRequestHandler.handle ] waiting for client `{str(self.client_address)}` to send  {MessageType.PACKAGE_VERIFIED.fullname} message' ])
+            package_verification_status, number_of_files = Message.receive(client_socket=self.request, msg_type=MessageType.PACKAGE_VERIFIED, log=self.server.log)
 
-            # the export code has completed its run; receive client verification data and update the manifest table - these
-            # happen simultaneously and asynchronously
-            asyncio.run(self.receive_verification_and_update_manifest(client_socket=self.request, product=product))
+            if package_verification_status != PackageVerificationStatus.VERIFIED:
+                self.server.log.write_error([ f'[ DataTransferTCPRequestHandler.handle ] package error for client `{str(self.client_address)}`: {package_verification_status.fullname}' ])
+            else:
+                self.server.log.write_debug([ f'[ DataTransferTCPRequestHandler.handle ] client `{str(self.client_address)}` verifies that package is valid' ])
 
-            # receive DATA_VERIFIED message from client;
-            # client must send a message here (after they have sent the requisite '\.\n'); this allows the client to notify
-            # the server of an error
-            number_of_files_verified = self._verified_message_values
+                # receive VERIFICATION_READY
+                self.server.log.write_debug([ f'[ DataTransferTCPRequestHandler.handle ] waiting for client `{str(self.client_address)}` to send {MessageType.VERIFICATION_READY.fullname} message' ])
+                Message.receive(client_socket=self.request, msg_type=MessageType.VERIFICATION_READY, log=self.server.log)
+
+                # the export code has completed its run; receive client verification data and update the manifest table - these
+                # happen simultaneously and asynchronously
+                asyncio.run(self.receive_verification_and_update_manifest(client_socket=self.request, product=product))
+
+                # receive DATA_VERIFIED message from client;
+                # client must send a message here (after they have sent the requisite '\.\n'); this allows the client to notify
+                # the server of an error
+                number_of_files_verified = self._verified_message_values
 
             # send REQUEST_COMPLETE
             self.server.log.write_debug([ f'[ DataTransferTCPRequestHandler.handle ] sending {MessageType.REQUEST_COMPLETE.fullname} message to client `{str(self.client_address)}`' ])
@@ -408,7 +479,14 @@ class DataTransferTCPRequestHandler(socketserver.BaseRequestHandler):
             # send error response; client should shut down socket connection
             self.server.log.write_error([ f'[ DataTransferTCPRequestHandler.handle ] error handling client request: {str(exc)}' ])
             self.server.log.write_error([ f'[ DataTransferTCPRequestHandler.handle ] sending {MessageType.ERROR.fullname} message to client `{str(self.client_address)}`' ])
-            Message.send(client_socket=self.request, msg_type=MessageType.ERROR, error_message=f'{str(exc)}')
+
+            if hasatt(exc, 'msg_type') and exc.msg_type is not None:
+                self.server.log.write_debug([ f'[ DataTransferTCPRequestHandler.handle ] sending {MessageType.PACKAGE_READY.fullname} message to client `{str(self.client_address)}`' ])
+                Message.send(client_socket=self.request, msg_type=exc.msg_type, error_message=f'{str(exc)}', **exc.kwargs)
+            else:
+                Message.send(client_socket=self.request, msg_type=MessageType.ERROR, error_message=f'{str(exc)}')
+
+            Message.send(client_socket=self.request, msg_type=MessageType.REQUEST_COMPLETE)
 
         try:
             if not terminate:
@@ -416,7 +494,7 @@ class DataTransferTCPRequestHandler(socketserver.BaseRequestHandler):
                 self.server.log.write_debug([ f'[ DataTransferTCPRequestHandler.handle ] waiting for client `{str(self.client_address)}` to close CONTROL connection' ])
                 if self.request.recv(128) == b'':
                     # client closed socket connection
-                    self.server.log.write_debug([ f'[ DataTransferTCPRequestHandler.handle ] client `{str(self.client_address)}` closed CONTROL connection' ])
+                    self.server.log.write_info([ f'[ DataTransferTCPRequestHandler.handle ] client `{str(self.client_address)}` closed CONTROL connection' ])
         except socket.timeout as exc:
             # end session (return from handler)
             self.server.log.write_error([ f'[ DataTransferTCPRequestHandler.handle ] timeout waiting for client to terminate control connection', f'{str(exc)}' ])
@@ -430,26 +508,28 @@ class DataTransferTCPRequestHandler(socketserver.BaseRequestHandler):
             except:
                 pass
 
-    async def create_package(self, *, product, number_of_files, file_template, package_path):
+    async def create_package(self, *, product, number_of_files, export_file_format, package_path):
+        self.server.log.write_debug([ f'[ DataTransferTCPRequestHandler.create_package ]' ])
         # get list of DRMS_IDs
-        self.server.log.write_info([ f'[ DataTransferTCPRequestHandler.create_package ] fetching {str(number_of_files)} DRMS_IDs for product {product} for client `{str(self.client_address)}`' ])
         self._fetch_is_done = False
         self._drms_ids = asyncio.Queue()
 
-        await asyncio.gather(self.fetch_drms_ids(product=product, number_of_ids=number_of_files), self.export_package(product=product, file_template=file_template))
-
+        self.server.log.write_debug([ f'[ DataTransferTCPRequestHandler.create_package ] fetching {str(number_of_files)} DRMS_IDs for product {product} for client `{str(self.client_address)}`' ])
+        await asyncio.gather(self.fetch_drms_ids(product=product, number_of_ids=number_of_files), self.export_package(product=product, export_file_format=export_file_format))
         # export code has completed
 
     async def receive_verification_and_update_manifest(self, *, client_socket, product):
+        self.server.log.write_debug([ f'[ DataTransferTCPRequestHandler.receive_verification_and_update_manifest ]' ])
         # after the last verification-data line, the client sends a single line with the chars '\\.\n'
         self._receive_is_done = False
         self._verified_segments = asyncio.Queue()
         self._verification_data_exist = False
-
         data_event = asyncio.Event()
+        self.server.log.write_debug([ f'[ DataTransferTCPRequestHandler.receive_verification_and_update_manifest ] receiving verification data for product {product} for client `{str(self.client_address)}`' ])
         await asyncio.gather(self.receive_verification(client_socket=client_socket, data_event=data_event), asyncio.create_task(self.update_manifest(data_event=data_event, product=product)))
 
     async def fetch_drms_ids(self, *, product, number_of_ids):
+        self.server.log.write_debug([ f'[ DataTransferTCPRequestHandler.fetch_drms_ids ]' ])
         # this 'fetch' command will create the manifest table should it not exist (but will fail if the series shadow table
         # does not exist); it will populate the manifest table with <segment>='N' rows until there are `number_of_ids` such
         # rows; it uses the series shadow table to populate the manifest table
@@ -462,7 +542,7 @@ class DataTransferTCPRequestHandler(socketserver.BaseRequestHandler):
         command = [ os.path.join(self.server.export_bin, 'data-xfer-manifest-tables'), f'series={product}', 'operation=fetch', f'n={number_of_ids}',  f'JSOC_DBUSER={self.server.export_production_db_user}', f'JSOC_DBHOST={self.server.db_host}' ]
 
         try:
-            self.server.log.write_info([ f'[ DataTransferTCPRequestHandler.fetch_drms_ids ] running manifest-table manager for client `{str(self.client_address)}`: {" ".join(command)}' ])
+            self.server.log.write_debug([ f'[ DataTransferTCPRequestHandler.fetch_drms_ids ] running manifest-table manager for client `{str(self.client_address)}`: {" ".join(command)}' ])
             proc = await asyncio.subprocess.create_subprocess_shell(' '.join(command), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
 
             while True:
@@ -479,8 +559,10 @@ class DataTransferTCPRequestHandler(socketserver.BaseRequestHandler):
             if proc.returncode is not None:
                 # child process terminated
                 if proc.returncode == 0:
+                    self.server.log.write_debug([ f'[ DataTransferTCPRequestHandler.fetch_drms_ids ] manifest manager ran successfully' ])
                     pass
                 else:
+                    self.server.log.write_debug([ f'[ DataTransferTCPRequestHandler.fetch_drms_ids ] manifest manager ran unsuccessfully, returned error code `{str(proc.returncode)}`' ])
                     stdout, stderr = proc.communicate()
                     if stderr is not None and len(stderr) > 0:
                         raise SubprocessError(msg=f'[ fetch_drms_ids ] failure running manifest-table manager: {stderr.decode()}' )
@@ -491,7 +573,8 @@ class DataTransferTCPRequestHandler(socketserver.BaseRequestHandler):
         except (ValueError, OSError) as exc:
             raise SubprocessError(msg=f'[ fetch_drms_ids ] {str(exc)}' )
 
-    async def export_package(self, *, product, file_template=None):
+    async def export_package(self, *, product, export_file_format=None):
+        self.server.log.write_debug([ f'[ DataTransferTCPRequestHandler.export_package ]' ])
         chunk_of_segments = OrderedDict()
         if self._drms_id_regex is None:
             self._drms_id_regex = re.compile(r'[a-z_][a-z_0-9$]*[.][a-z_][a-z_0-9$]*:([0-9]+):([a-z_][a-z_0-9$]*)')
@@ -502,12 +585,13 @@ class DataTransferTCPRequestHandler(socketserver.BaseRequestHandler):
         specification = f'{product}_manifest::[*]'
         arg_list = [ 'a=0', 's=0', 'e=1', 'm=1', 'DRMS_DBUTF8CLIENTENCODING=1', f'spec={specification}', f'JSOC_DBUSER={self.server.export_production_db_user}', f'JSOC_DBHOST={self.server.db_host}' ]
 
-        if file_template is not None and len(file_template) > 0:
-            arg_list.append(f'ffmt={file_template}')
+        if export_file_format is not None and len(export_file_format) > 0:
+            arg_list.append(f'ffmt={export_file_format}')
 
         try:
             # we need to run drms-export-to-stdout, even if no DRMS_IDs are available for processing; running drms-export-to-stdout will create an empty manifest file in this case
-            self.server.log.write_info([ f'[ DataTransferTCPRequestHandler.create_package ] running export for client `{str(self.client_address)}`: {str(arg_list)}' ])
+            command = f"{os.path.join(self.server.export_bin, 'drms-export-to-stdout')} {' '.join(arg_list)}"
+            self.server.log.write_debug([ f'[ DataTransferTCPRequestHandler.create_package ] running export for client `{str(self.client_address)}`: {command}' ])
             proc = await asyncio.subprocess.create_subprocess_exec(os.path.join(self.server.export_bin, 'drms-export-to-stdout'), *arg_list, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE)
 
             self.server.log.write_debug([f'[ DataTransferTCPRequestHandler.create_package ] forked child process (pid {str(proc.pid)})'])
@@ -538,7 +622,7 @@ class DataTransferTCPRequestHandler(socketserver.BaseRequestHandler):
                         # send recnums to drms-export-to-stdout (which is expecting recnums from stdin)
                         self.server.log.write_debug([f'[ DataTransferTCPRequestHandler.create_package ] sending {",".join(chunk_of_segments)} to process (pid {str(proc.pid)})'])
                         proc.stdin.write('\n'.join(list(chunk_of_segments)).encode())
-                        self.server.log.write_debug([f'[ DataTransferTCPRequestHandler.create_package ] sent chunk of {str(len(chunk_of_segments))} recnums to process (pid {str(proc.pid)})'])
+                        self.server.log.write_debug([f'[ DataTransferTCPRequestHandler.create_package ] sent chunk of {str(len(chunk_of_segments))} segments to process (pid {str(proc.pid)})'])
                         await proc.stdin.drain()
                 else:
                     raise SubprocessError(msg=f'export process died unexpectly, error code {str(proc.returncode)}')
@@ -553,9 +637,8 @@ class DataTransferTCPRequestHandler(socketserver.BaseRequestHandler):
             while True:
                 # read data package file from export subprocess
                 bytes_read = await proc.stdout.read(16384)
-                # self.server.log.write_debug([ f'[ DataTransferTCPRequestHandler.create_package ] got bytes from drms-export-to-stdout {bytes_read.decode()}' ])
                 if bytes_read == b'':
-                    self.server.log.write_debug([ f'[ DataTransferTCPRequestHandler.create_package ] got end of file - total num bytes read {total_num_bytes_read}, total num bytes written {total_num_bytes_written}' ])
+                    self.server.log.write_debug([ f'[ DataTransferTCPRequestHandler.create_package ] got end of file' ])
                     break
 
                 total_num_bytes_read += len(bytes_read)
@@ -564,10 +647,8 @@ class DataTransferTCPRequestHandler(socketserver.BaseRequestHandler):
                 num_bytes_written = 0
                 while num_bytes_written < len(bytes_read):
                     num_bytes_written += self._data_file.write(bytes_read[num_bytes_written:])
-                    # self.server.log.write_debug([ f'[ DataTransferTCPRequestHandler.create_package ] wrote {num_bytes_written} bytes to tar file' ])
 
                 total_num_bytes_written += num_bytes_written
-                # self.server.log.write_debug([ f'[ DataTransferTCPRequestHandler.create_package ] read {len(bytes_read)} bytes, wrote {num_bytes_written} bytes to tar file' ])
 
             self.server.log.write_debug([ f'[ DataTransferTCPRequestHandler.create_package ] total num bytes read {total_num_bytes_read}, total num bytes written {total_num_bytes_written}' ])
 
@@ -580,7 +661,7 @@ class DataTransferTCPRequestHandler(socketserver.BaseRequestHandler):
             raise ExportFileError(msg=f'{str(exc)}')
 
     async def receive_verification(self, *, client_socket, data_event):
-        self.server.log.write_debug([ f'[ DataTransferTCPRequestHandler.receive_verification ] receiving verification data from client `{str(self.client_address)}`' ])
+        self.server.log.write_debug([ f'[ DataTransferTCPRequestHandler.receive_verification ]' ])
         data_block = b''
         partial_line_start = None
         partial_line_end = None
@@ -588,7 +669,7 @@ class DataTransferTCPRequestHandler(socketserver.BaseRequestHandler):
         while True:
             try:
                 data_block = client_socket.recv(8192)
-                self.server.log.write_debug([ f'[ DataTransferTCPRequestHandler.receive_verification ] received verification data {data_block.decode()}' ])
+                self.server.log.write_debug([ f'[ DataTransferTCPRequestHandler.receive_verification ] from client `{str(self.client_address)}` received verification data `{data_block.decode()}`' ])
                 if data_block == b'':
                     break
 
@@ -676,6 +757,26 @@ class DataTransferTCPRequestHandler(socketserver.BaseRequestHandler):
 
                 full_lines = full_line_buffer
 
+                verified_segments = []
+                if len(full_lines) > 0:
+                    self.server.log.write_debug([ f'[ DataTransferTCPRequestHandler.receive_verification ] extracting verified recnums from  {str(full_lines)}' ])
+                    verified_segments = [ ( self._drms_id_regex.match(line.split()[0]).group(1), self._drms_id_regex.match(line.split()[0]).group(2) ) for line in full_lines if line.split()[1] == DataFileVerificationStatus.GOOD.fullname ]
+                    self.server.log.write_debug([ f'[ DataTransferTCPRequestHandler.receive_verification ] verified segments for client {str(self.client_address)}: {",".join([ recnum + ":" + segment for recnum, segment in verified_segments ])}' ])
+
+                    if len(verified_segments) != len(full_lines):
+                        bad_segments = [ ( self._drms_id_regex.match(line.split()[0]).group(1), self._drms_id_regex.match(line.split()[0]).group(2), line.split()[1]) for line in full_lines if line.split()[1] != DataFileVerificationStatus.GOOD.fullname ]
+
+                        self.server.log.write_error([ f'[ DataTransferTCPRequestHandler.receive_verification ] BAD segment: {str(recnum)}:{segment} (code {error_code})' for recnum, segment, error_code in bad_segments ])
+
+                for recnum, segment in verified_segments:
+                    # we know we have some verification data
+                    if not self._verification_data_exist:
+                        self._verification_data_exist = True
+                        data_event.set()
+                    await self._verified_segments.put((recnum, segment))
+
+                self.server.log.write_debug([ f'[ DataTransferTCPRequestHandler.receive_verification ] finished sending {len(verified_segments)} recnums for verification processing (for client `{str(self.client_address)}`)' ])
+
                 if client_end:
                     # combine next lines to make the DATA_VERIFIED message; the problem is that
                     # part of the message could already be in the full_lines buffer, and part
@@ -688,21 +789,6 @@ class DataTransferTCPRequestHandler(socketserver.BaseRequestHandler):
                     self.server.log.write_debug([ f'[ DataTransferTCPRequestHandler.receive_verification ] verified-message values {str(self._verified_message_values)}' ])
 
                     break
-
-                verified_segments = []
-                if len(full_lines) > 0:
-                    self.server.log.write_debug([ f'[ DataTransferTCPRequestHandler.receive_verification ] extracting verified recnums from  {str(full_lines)}' ])
-                    verified_segments = [ ( self._drms_id_regex.match(line.split()[0]).group(1), self._drms_id_regex.match(line.split()[0]).group(2) ) for line in full_lines if line.split()[1] == 'V' ]
-                    self.server.log.write_debug([ f'[ DataTransferTCPRequestHandler.receive_verification ] verified segments: {",".join([ recnum + ":" + segment for recnum, segment in verified_segments ])}' ])
-
-                for recnum, segment in verified_segments:
-                    # we know we have some verification data
-                    if not self._verification_data_exist:
-                        self._verification_data_exist = True
-                        data_event.set()
-                    await self._verified_segments.put((recnum, segment))
-
-                self.server.log.write_debug([ f'[ DataTransferTCPRequestHandler.receive_verification ] finished sending {len(verified_segments)} recnums for verification processing (for client `{str(self.client_address)}`)' ])
             except socket.timeout as exc:
                 # no data written to pipe
                 raise MessageTimeoutError(msg=f'timeout event waiting for server {data_socket.getpeername()} to send data')
@@ -715,11 +801,12 @@ class DataTransferTCPRequestHandler(socketserver.BaseRequestHandler):
             data_event.set()
 
     async def update_manifest(self, *, data_event, product):
-        self.server.log.write_debug([ f'[ DataTransferTCPRequestHandler.update_manifest ] updating product {product} manifest with data received from client `{str(self.client_address)}`' ])
+        self.server.log.write_debug([ f'[ DataTransferTCPRequestHandler.update_manifest ]' ])
 
         await data_event.wait()
         if self._verification_data_exist:
             # only run the manifest-update code if there are verification data
+            self.server.log.write_debug([ f'[ DataTransferTCPRequestHandler.update_manifest ] updating product {product} manifest with data received from client `{str(self.client_address)}`' ])
             try:
                 while True:
                     # a list of recnum decimal byte strings
@@ -744,6 +831,7 @@ class DataTransferTCPRequestHandler(socketserver.BaseRequestHandler):
 
                     # we have our chunk of recnums in `chunk_of_segments`
                     if len(chunk_of_segments) > 0:
+                        self.server.log.write_debug([ f'[ DataTransferTCPRequestHandler.update_manifest ] chunk of verified segments sending to manifest-table manager: {str(chunk_of_segments)}' ])
                         # arrange by segments -> recnums, a la:
                         # (segA) -> 5
                         # (segA, segB) -> 1, 8, 3, 22
@@ -856,12 +944,12 @@ if __name__ == "__main__":
                     continue
 
                 try:
-                    log.write_info([ f'attempting to create {str(family)} TCP server with address`{str(socket_address)}`' ])
+                    log.write_info([ f'[ __main__ ] attempting to create {str(family)} TCP server with address`{str(socket_address)}`' ])
 
                     with DataTransferTCPServer(socket_address, DataTransferTCPRequestHandler) as data_server:
                         bound = True
                         # can re-use socket_address after socket is closed
-                        log.write_info([ f'successfully created socketserver server, listening on {str(socket_address)}' ])
+                        log.write_info([ f'[ __main__ ] successfully created socketserver server, listening on {str(socket_address)}' ])
 
                         data_server.chunk_size = arguments.chunk_size
                         data_server.export_bin = arguments.export_bin
@@ -874,17 +962,17 @@ if __name__ == "__main__":
                         data_server_thread = threading.Thread(target=data_server.serve_forever)
                         data_server_thread.daemon = True
                         data_server_thread.start()
-                        log.write_info([ f'successfully started server thread' ])
+                        log.write_info([ f'[ __main__ ] successfully started server thread' ])
 
                         exit_event.wait()
-                        log.write_info([ f'received shutdown signal...shutting down TCP server' ])
+                        log.write_info([ f'[ __main__ ] received shutdown signal...shutting down TCP server' ])
                         data_server.shutdown()
 
-                    log.write_info([ f'successfully shut down TCP server' ])
+                    log.write_info([ f'[ __main__ ] successfully shut down TCP server' ])
                     break
                 except OSError as exc:
-                    log.write_warning([ f'{str(exc)}' ])
-                    log.write_warning([ f'trying next address (could not create socketserver on {str(arguments.listen_port)})' ])
+                    log.write_warning([ f'[ __main__ ] {str(exc)}' ])
+                    log.write_warning([ f'[ __main__ ] trying next address (could not create socketserver on {str(arguments.listen_port)})' ])
                     continue
 
             if bound:
