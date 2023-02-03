@@ -206,6 +206,9 @@ class SumsDrmsParams(DRMSParams):
             raise ParamsException('unknown DRMS parameter: ' + name)
         return val
 
+    def get_optional(self, name):
+        # if the parameter does not exist, returns None
+        return super(SumsDrmsParams, self).get(name)
 
 class Arguments(object):
 
@@ -1727,7 +1730,10 @@ class SUFileOwnerModUpdater(object):
     @classmethod
     def set_lock_file(cls, *, lock_path, type):
         # create lock file so that only one sum_chmown at a time, or one user editing put_file in 10 seconds
-        cls._updater_lock = DrmsLock(lock_path, None, True) # None ==> do not automatically write content to file, True ==> retry 10 times
+        if lock_path is not None:
+            cls._updater_lock = DrmsLock(lock_path, None, True) # None ==> do not automatically write content to file, True ==> retry 10 times
+        else:
+            self._updater_lock = None
         cls._updater_lock_path = lock_path
         cls._updater_lock_type = type
 
@@ -1750,7 +1756,20 @@ class SUFileOwnerModUpdater(object):
         elif cls._updater_lock_type == 'chmown':
             return SumChmownUpdater(chmown_path=worker.chmown_path, log=worker.log)
         else:
-            raise ArgsException('[ SUFileOwnerModUpdater.create_updater ] must specify lock type before creating file owner/privileges updater')
+            return NoopSuFileUpdater(log=worker.log)
+
+class NoopSuFileUpdater(SUFileOwnerModUpdater):
+    def __init__(self, *, log=None):
+        self._log = log
+        if self._log:
+            log.write_debug([ '[ NoopSuFileUpdater.__init__ ] creating {updater_type} updater'.format(updater_type=str(self)) ])
+
+        self._chmown_path = None
+
+    def update(self, su_path):
+        # noop - do not do anthing with SU file owner or perms
+        pass
+
 
 class SumChmownUpdater(SUFileOwnerModUpdater):
     def __init__(self, *, chmown_path, log=None):
@@ -2857,8 +2876,12 @@ if __name__ == "__main__":
 
         arguments = Arguments(parser)
 
-        put_file_path = sumsDrmsParams.get('SUMS_PUT_FILE')
-        sum_chmown_path = os.path.join(sumsDrmsParams.get('SUMBIN_BASEDIR'), 'sum_chmown')
+        put_file_path = sumsDrmsParams.get_optional('SUMS_PUT_FILE')
+        sums_bin_path = sumsDrmsParams.get_optional('SUMBIN_BASEDIR')
+        sum_chmown_path = None
+
+        if sums_bin_path is not None:
+            sum_chmown_path = os.path.join(sums_bin_path, 'sum_chmown')
 
         Worker.setMaxThreads(int(arguments.getArg('maxconn')))
         pid = os.getpid()
@@ -2884,6 +2907,7 @@ if __name__ == "__main__":
             log.write_debug([ '[ __main__ ] initializing updater lock file {lock_file} for chmown'.format(lock_file=lock_path) ])
             SUFileOwnerModUpdater.set_lock_file(lock_file=lock_path, type='chmown')
         else:
+            SUFileOwnerModUpdater.set_lock_file(lock_file=None, type=None)
             log.write_warning([ '[ __main__ ] no file owner/priv updater specified' ])
 
         thContainer = [ arguments, str(pid), log ]
