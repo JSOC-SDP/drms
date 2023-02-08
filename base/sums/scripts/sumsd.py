@@ -2905,9 +2905,9 @@ if __name__ == "__main__":
         elif sum_chmown_path is not None and os.path.exists(sum_chmown_path):
             lock_path=os.path.join(sumsDrmsParams.get('DRMS_LOCK_DIR'), SUMS_CHMOWN_LOCK_FILE)
             log.write_debug([ '[ __main__ ] initializing updater lock file {lock_file} for chmown'.format(lock_file=lock_path) ])
-            SUFileOwnerModUpdater.set_lock_file(lock_file=lock_path, type='chmown')
+            SUFileOwnerModUpdater.set_lock_file(lock_path=lock_path, type='chmown')
         else:
-            SUFileOwnerModUpdater.set_lock_file(lock_file=None, type=None)
+            SUFileOwnerModUpdater.set_lock_file(lock_path=None, type=None)
             log.write_warning([ '[ __main__ ] no file owner/priv updater specified' ])
 
         thContainer = [ arguments, str(pid), log ]
