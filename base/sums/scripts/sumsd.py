@@ -2691,7 +2691,7 @@ class Worker(threading.Thread):
     # Must acquire Worker lock BEFORE calling newThread() since newThread() will append to tList (the Worker threads will be deleted from tList as they complete).
     @staticmethod
     def newThread(sock, has_tape_sys, has_mult_part_sets, timeout, chmown_path, log):
-        worker = Worker(sock=sock, has_tape_sys=has_tape_sys, has_mult_part_sets=has_mult_part_sets, timeout=timeout, chmown_path=None, log=log)
+        worker = Worker(sock=sock, has_tape_sys=has_tape_sys, has_mult_part_sets=has_mult_part_sets, timeout=timeout, chmown_path=chmown_path, log=log)
         Worker.tList.append(worker)
         worker.start()
 
