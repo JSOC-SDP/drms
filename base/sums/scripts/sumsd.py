@@ -2691,7 +2691,7 @@ class Worker(threading.Thread):
     # Must acquire Worker lock BEFORE calling newThread() since newThread() will append to tList (the Worker threads will be deleted from tList as they complete).
     @staticmethod
     def newThread(sock, has_tape_sys, has_mult_part_sets, timeout, chmown_path, log):
-        worker = Worker(sock=sock, has_tape_sys=has_tape_sys, has_mult_part_sets=has_mult_part_sets, timeout=timeout, chmown_path=None, log=log)
+        worker = Worker(sock=sock, has_tape_sys=has_tape_sys, has_mult_part_sets=has_mult_part_sets, timeout=timeout, chmown_path=chmown_path, log=log)
         Worker.tList.append(worker)
         worker.start()
 
@@ -2905,9 +2905,9 @@ if __name__ == "__main__":
         elif sum_chmown_path is not None and os.path.exists(sum_chmown_path):
             lock_path=os.path.join(sumsDrmsParams.get('DRMS_LOCK_DIR'), SUMS_CHMOWN_LOCK_FILE)
             log.write_debug([ '[ __main__ ] initializing updater lock file {lock_file} for chmown'.format(lock_file=lock_path) ])
-            SUFileOwnerModUpdater.set_lock_file(lock_file=lock_path, type='chmown')
+            SUFileOwnerModUpdater.set_lock_file(lock_path=lock_path, type='chmown')
         else:
-            SUFileOwnerModUpdater.set_lock_file(lock_file=None, type=None)
+            SUFileOwnerModUpdater.set_lock_file(lock_path=None, type=None)
             log.write_warning([ '[ __main__ ] no file owner/priv updater specified' ])
 
         thContainer = [ arguments, str(pid), log ]
