@@ -1733,7 +1733,7 @@ class SUFileOwnerModUpdater(object):
         if lock_path is not None:
             cls._updater_lock = DrmsLock(lock_path, None, True) # None ==> do not automatically write content to file, True ==> retry 10 times
         else:
-            self._updater_lock = None
+            cls._updater_lock = None
         cls._updater_lock_path = lock_path
         cls._updater_lock_type = type
 
